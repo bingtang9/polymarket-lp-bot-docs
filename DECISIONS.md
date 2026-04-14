@@ -617,3 +617,30 @@ r_daily = reward_daily / (my_capital + zone_cap_in_zone)
 - own_ratio ≥ 0.3% (千三) 隐含 zone_cap ≤ $8 / 0.003 - $8 ≈ **$2.66k**
 - 实际入池数严重受限（只有 zone ≤ $2.6k 的小盘标能过 own_ratio）
 **实测**：3 个 LoL 电竞总场数标入池（zone $2.2k-2.3k），各 $6 cap
+
+### D-043 Tier C "news_event"（用户决策 2026-04-14）
+**结论**：新增第三类 news_event，容纳短期非体育事件标（政治/科技/经济/地缘）
+
+| 项 | Tier A 长期 | Tier B 体育 | **Tier C 新闻** |
+|---|---|---|---|
+| 识别 | 兜底默认 | sports tag | politics/ai/trump/iran/nato/gpt 等 tag |
+| T 门槛 | ≥ 90d | 距开赛 ≥ 5h | **≥ 2d**（不做当日） |
+| σ 上限 | 5% (D-041) | 5% | **10%** |
+| 价格 | [1, 99] | [5, 95] | [1, 99] |
+| 点差 | ≥ ±3 | ≥ ±2 | ≥ ±3 |
+| 类别优先级 | 兜底 | 最高（先 sports → news → long） | 中 |
+
+**新增 affordability 硬门槛**（适用所有类别）：
+`rewards_min_size × min(mid_yes, mid_no) ≤ my_capital_usd`
+防止"进了池但挂不上"的隐式不可行标。
+
+**Why**：$100 资金下大量高奖池标是短期新闻（Trump/Iran/NATO/GPT 等），Tier A T ≥ 90d 和 Tier B sports tag 都容纳不了，需要新类别。
+
+### D-044 Tier C 放松 own_ratio + front_queue（用户决策 2026-04-14）
+**结论**：Tier C 新闻专用放松：
+- `own_ratio` 0.003 → **0.0005**（千0.5，接受更小份额）
+- `front_queue` $500 → **$100**（小流动性市场前方资金薄是常态）
+- 其它 tier 保持不变
+
+**Why**：$100 cap × 千三 = zone 必须 ≤ $2.66k，但新闻标的 zone 普遍 $5k-$50k，必然被卡；放松后 $100 能真正选出短期新闻标
+**实测**：5669 评估 → 29 通过 → **18 入池**（全为 news_event 类别，涵盖政治/科技/经济/地缘/流行文化）
