@@ -260,6 +260,65 @@
 
 ---
 
+## 2026-04-13（Phase 2）
+
+### D-031 Phase 2 筛选器/监控器若干实现决策
+
+**结论汇总**（若干非平凡实现选择，非策略层决策）：
+
+1. **启动 catchup 阈值 22h**：daemon 启动时若最近一次 `screener_runs.run_at`
+   距今 > `screener.catchup_threshold_hours`（默认 22h），立即跑一次筛选并推
+   TG，然后再按每日 UTC 00:00 节奏循环。避免"凌晨 00:00 重启 → 今天拿不到报
+   告"的空窗。阈值定为 22h（而非 24h）是为了让昨天勉强跑过一次的情况不会被
+   误当作补跑机会。
+
+2. **σ 不足历史处理**：`get_price_history` 返回 < 30 条 1-min 样本时，
+   `compute_sigma_from_points` 返回 `(None, None)`；`gate_sigma` 以
+   `"insufficient_history"` 拒绝该标的；`gate_no_recent_jump` 同步拒绝
+   `"missing_24h_history"`。保守语义：没有数据就不承认，宁错杀不错放。
+
+3. **极端价格带 σ 用 peak-to-trough 替代 stdev**：当 current_mid 落在
+   `(0.10, 0.90)` 之外时，7 天 stdev 在边缘被严重压缩（数学上 p 接近 1
+   或 0 的伯努利过程方差本就趋近 0），直接用 stdev/mid 会低估风险。此时
+   改用窗口内 max-min 幅度 / mid（即"最大跳动幅度"）作为 σ。对应 README
+   §4.2 维度 3 中的"价格 >90 或 <10 改用最近 7 天最大跳动幅度"。
+
+4. **monitor 的 4h σ 暂未实现（退而求其次）**：§4.6 退出条件 2 要求"σ 实时
+   滑动窗口（最近 4h）超过 3%"。我们目前 *没有* 本地的 prices_history 表
+   —— σ 是筛选时临时从 PM `/prices-history` 拉一次算出来的。每 5 分钟对
+   每个池内标的再拉一次 4h 窗口会烧掉 relayer 配额。暂行方案：
+   - 监控器 *不* 每周期重算 σ
+   - 其它 7 个退出条件（跳动、深度、拥挤、own_ratio、到期、状态、reward_spread 收窄）
+     全部生效，覆盖绝大部分风险情景
+   - TODO（Phase 3）：自建 prices_history 表 + websocket 订阅，或降低到 1h 间隔
+
+5. **depth 三段法"取两侧中较小值"**：筛选器和监控器在读取 front_depth /
+   back_depth 时，用 `min(yes_side, no_side)` 而非相加，因为我们要求 *两侧都*
+   能满足深度门槛（我们计划双向挂单，哪一侧先崩就先被塞）。这与 §5.5 "保护墙 + 逃生通道"
+   的双向语义一致。
+
+6. **容量预估用 per_market_max_ratio 做保守上限**：在 own_ratio 计算里，
+   `my_capital` 取 `total_usd × per_market_max_ratio`（即单标最大可投），
+   而非平摊额度。好处：门槛只会比实盘实际 own_ratio *更容易通过*，不会发
+   生"门槛放行了但实盘资金少到进不去"的情况。
+
+7. **TG MarkdownV2 用 fenced code block 包裹数据**：所有 slug/reason/number
+   在信息块里走 ` ``` ` 围栏，块内无需逐字转义；只对头部 emoji 旁边的零碎
+   标量（run date、账户行、footer）用 `escape_markdown_v2` 转。
+   好处：保持密度 + 避免漏转。
+
+8. **CLI：`pmbot collect` 默认启动 screener+monitor**，新增 `--collect-only`
+   回退到 Phase 1 行为。收集 + 筛选 + 监控共用同一个 PMClient 和 session
+   factory，无需多进程。
+
+9. **TG 客户端默认启用 `trust_env=True`**：httpx 会读取 `HTTPS_PROXY` /
+   `https_proxy` 环境变量。在 macOS 本地代理场景（Clash 等）下即插即用。
+
+**Why now**：这些都是 Phase 2 实现中现实约束迫使的折中，文档化后
+Phase 3（真实下单）做取舍时有据可依。
+
+---
+
 ## 2026-04-13（Phase 1.5）
 
 ### D-030 Orderbook 存储布局：每 side 一行
