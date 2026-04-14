@@ -195,6 +195,29 @@
 
 ---
 
+### D-027 筛选维度扩展：奖池 + zone 内总资金
+**结论**：在维度 4（收益率 R）下显式拆出两个独立可观测量：
+- `reward_fund_daily` = PM `total_daily_rate`（该标的每日总奖励池 USD）
+- `total_LP_capital_in_zone` = **仅 reward zone 内** 所有 LP 资金 = Σ(qty × price) for all orders within `[mid − rewards_max_spread, mid + rewards_max_spread]`，含 bid + ask 两侧
+
+**新增子门槛**（与 R ≥ 5% 一同必须满足）：
+- `reward_fund_daily ≥ 5 USD/day`
+- `total_LP_capital_in_zone ≤ 50,000 USD`
+- `expected_own_ratio = my_capital / (my_capital + total_LP_capital_in_zone) ≥ 2%`
+
+**新派生指标**：
+- 奖励密度 = `reward_fund_daily / total_LP_capital_in_zone` （越高=市场越"未被吃透"）
+- R_est_APR = `reward_fund_daily × expected_own_ratio × 365 / my_capital`
+
+**与维度 2（深度 D）的关键区别**（用户提问澄清）：
+- D = 盘口前 5 档美元数 → 关注**抗冲击/反塞单**
+- total_LP_capital_in_zone = zone 内全部参与方资金 → 关注**奖励稀释程度/反拥挤**
+- 二者可独立变化（D 高但 zone 内人少；或 D 低但 zone 内分散许多人）→ 必须分开看
+
+**对 Phase 1 的影响**：orderbook collector 入库时需要标记每个 level 是否在 zone 内（或在分析层算）。我会派 followup agent 在 Phase 1 收完工后增加该派生字段。
+
+---
+
 ## Phase 0 延续的待定项（Phase 1/2 验证）
 
 | 编号 | 问题 | 状态 |
