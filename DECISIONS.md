@@ -132,10 +132,80 @@
 | Q-A3 | mid 抖动容忍 tick 数 | ⏳ 默认 ±1 |
 | Q-A4 | 塞单后冷却分钟数 | ⏳ 默认 30 |
 | Q-A5 | 日回撤熔断阈值 | ⏳ 默认 −3% 暂停 / −5% 熔断 |
-| Q-B1a | PM 是否有公开历史 API | Phase 0 调研 |
-| Q-B1b | 若无历史，自采 7–14 天后再回测 | Phase 0 后确定 |
-| Q-T1 | PM 是否支持 `replace` 保留队列优先级 | Phase 0 调研 |
-| Q-T2 | reward_spread 变更通知机制 | Phase 0 调研 |
+| Q-B1a | ~~PM 是否有公开历史 API~~ | ✅ 已定（见 D-020） |
+| Q-B1b | ~~若无历史，自采 7–14 天后再回测~~ | ✅ 已定（见 D-020） |
+| Q-T1 | ~~PM 是否支持 `replace`~~ | ✅ 已定（见 D-021） |
+| Q-T2 | ~~reward 变更通知机制~~ | ✅ 已定（见 D-022） |
+
+---
+
+## 2026-04-14（续）— Phase 0 调研结论
+
+> 详见 `docs/pm_api_research.md`
+
+### D-020 历史数据策略
+**结论**：
+- mid 价历史：用 PM `GET /prices-history`（1 分钟粒度）
+- 深度 / 盘口历史：**PM 无公开 API → 必须自采**
+- 实施：Phase 1 数据采集启动后同时落盘盘口快照，积累 ≥7 天再做深度相关回测；先期可用纯 mid 做粗糙回测
+**原因**：用户要求"先用历史数据回测"——mid 层回测可即刻开始，深度回测要等自采数据
+
+### D-021 PM 无原子 replace
+**结论**：PM 所有重挂都必然是 `cancel → post new`，**队列优先级丢失不可避免**
+**影响**：
+- README §5.7 "使用 replace 保留队列优先级" 假设不成立，已改写
+- 策略权重进一步向 `time_in_zone`（累计在 zone 时长）倾斜
+- 好消息：PM reward 按一周 10,080 次 1 分钟采样计分，是**时长累计型**而非"谁先挂谁优先"
+**延伸决策**：每分钟撤重挂次数硬上限 10 次（避免触发 relayer 25 req/min 限流）
+
+### D-022 Reward 参数获取
+**结论**：
+- 无 push / webhook
+- 必须轮询 `GET /rewards/markets/current`
+- 轮询周期：**60–120 秒**（D-023 定）
+**每标返回字段**：
+- `rewards_max_spread`（tick 数，即我们的 reward_spread）
+- `rewards_min_size`（挂单最小份数）
+- `total_daily_rate`（该标每日总 reward 池）
+
+### D-023 Reward 轮询周期
+**结论**：默认 90 秒
+**原因**：
+- 太频繁（30s）占用 API 配额
+- 太稀疏（300s）可能错过参数调整
+- 90s 为中间值，实盘跑几天后再调
+
+### D-024 SDK 技术栈
+**结论**：
+- 主：`py-clob-client` v0.34.6（Feb 2026 发布，覆盖约 95% 需求）
+- 补充：`web3.py`（token allowance 授权，一次性）+ `httpx`（Gamma/Data API 访问）
+- **不需要**直接调 CTF Exchange 合约（MVP 阶段）
+
+### D-025 新增风险：Adjusted Midpoint
+**结论**：
+- PM 用 "adjusted midpoint"（过滤 dust 订单后的中间价）来计 reward
+- 这可能与我们观测的 mid 不同
+- **需要实盘实验测量 dust 阈值**——加入 Phase 2 验证清单
+
+### D-026 Proxy Wallet 签名类型
+**结论**：
+- PM 钱包有 `signature_type` 字段（0/1/2），错配下单会被拒（错误信息模糊）
+- 交易前必须链上检测钱包是否有 Safe proxy → 动态设置 `signature_type` 和 `funder`
+- 第一次启动自动检测并持久化到 DB（`config_history` 表）
+
+---
+
+## Phase 0 延续的待定项（Phase 1/2 验证）
+
+| 编号 | 问题 | 状态 |
+|---|---|---|
+| Q-N1 | Adjusted midpoint 的 dust 阈值 | 需实盘实验 |
+| Q-N2 | py-clob-client 是否有 `get_rewards_*` 包装 | Phase 1 确认 |
+| Q-N3 | 单钱包最大未完成订单数 | Phase 1 确认 |
+| Q-N4 | 批量撤单算 1 次还是 N 次 relayer 调用 | Phase 1 确认 |
+| Q-N5 | neg-risk 市场的特殊语义 | Phase 2 调研 |
+| Q-N6 | 标的到期后已挂单的处理行为 | Phase 1 确认 |
+| Q-N7 | fee-tier 按钱包变化的机制 | Phase 1 确认 |
 
 ---
 

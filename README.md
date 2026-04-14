@@ -288,8 +288,10 @@ for market in in_pool_markets:
 
 ### 5.7 time_in_zone 最大化技巧
 - 挂单还在 zone 内 + 深度未违规 → **不动**（撤就归零排队）
-- 使用 `replace` 而非 `cancel+new`（如 PM 支持，保留队列优先级）
+- **PM 无原子 replace**（Phase 0 调研确认）：所有重挂都是 cancel + post，队列优先级必然丢失 → 更要克制频繁重挂
+  - 好消息：PM reward 按一周 **10,080 次 1 分钟采样**计分，"累计在 zone 内的时长"比"队列最前"更关键
 - mid 在 ±1 tick 内抖动不触发重挂（可调）
+- **Relayer 限流 25 req/min**：下单/撤单都消耗配额，重挂太频繁会被限流 → 每分钟撤重挂不超 10 次为宜
 
 ### 5.8 塞单处置（第二防线）
 
@@ -487,11 +489,21 @@ bot 解锁钱包 → 开始交易
 - **A4 塞单后冷却时间**：30 分钟（默认），待数据
 - **A5 回撤熔断阈值**：日 −3% 暂停 / −5% 熔断（默认），待数据
 
-### 10.2 技术待调研（Phase 0）
-- PM 是否支持 `replace` 操作（保留队列优先级）
-- `reward_spread` 如何实时获取 / 订阅变更通知
-- 不同标的 `min_qty` 与份数/美元的对应关系
-- PM 历史数据是否有公开 API，没有则自采
+### 10.2 技术调研结论（Phase 0 已完成，详见 `docs/pm_api_research.md`）
+- ❌ **PM 不支持** 原子 `replace` —— 所有重挂都是 cancel+post，队列重排（好消息：reward 按周 10080 次采样，时长累计型，队列位置不致命）
+- ❌ **reward 无 push**：需要 REST 轮询 `GET /rewards/markets/current`，推荐 60–120s 周期
+- ✅ **min_qty 可取**：rewards endpoint 每标返回 `rewards_min_size`（份数）和 `rewards_max_spread`（tick 数）
+- ⚠️ **历史数据部分可用**：mid 历史有（`/prices-history`，1 分钟粒度），**盘口深度历史没有** → 深度相关回测必须自采
+- ⚠️ **新风险**：PM 计分用 "adjusted midpoint"（过滤 dust 后），可能与我们观测的 mid 不同 —— 需实盘实验确认
+- ⚠️ **Relayer 限速 25 req/min**：撤 + 下 都消耗配额，强化"不要无谓重挂"的规则
+- ⚠️ **proxy wallet `signature_type`**：0/1/2 三种，配错下单会被拒；trade 前需链上确认钱包是否有 Safe proxy
+
+### 10.3 SDK 选型结论
+- **主用 py-clob-client v0.34.6**（Feb 2026）覆盖 ~95% 需求
+- **补充**：
+  - `web3.py` — 一次性 token allowance 授权
+  - `httpx` — 调用 Gamma / Data API（py-clob-client 未覆盖的元数据）
+- MVP 不需要直接调 CTF 合约
 
 ### 10.3 待实盘验证
 - target_own_share = 5% 是否保守过头
