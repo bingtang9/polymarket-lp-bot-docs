@@ -5,6 +5,59 @@
 
 ---
 
+## 2026-04-14（Phase 3a）
+
+### D-045 Trading primitives: paper-mode-default, proxy detection, risk guard
+**背景**：Phase 3a 首次让 bot 具备下单能力（可花真钱）。安全优先于功能。
+
+**结论**：
+- **`trading.paper_mode=true`** 是默认值。`PMTrader.place_order` / `cancel_*`
+  在 paper mode 下**完全不调 CLOB**，仅写 DB + emit `PAPER_ORDER` event，
+  订单行 `extra.paper_mode=true` 区分。切换到实盘要求：
+  1. YAML 手动改 `paper_mode=false`
+  2. 首个 `place_order` 必须带 `confirm_real_trade=True`（CLI: `--live` + `--confirm-real-trade`）
+  3. stderr 打印 warning，不会静悄悄切换
+- **Notional × 1.5 硬顶**：实盘下任何订单 `price * qty > per_market_cap * 1.5`
+  直接 `raise OrderSafetyError`，不发网络请求。
+- **Proxy wallet 检测（D-026 延伸）**：`PMTrader.detect_proxy_wallet()` 在
+  `unlock` CLI 中自动运行，结果写 `events(type=PROXY_WALLET_DETECTED)`。
+  Phase 3a 先写骨架：若 `web3.py` 未安装/RPC 未配则退化为 EOA
+  (`signature_type=0, funder=<EOA>`) 并 warn，用户可在 config 手动覆盖。
+  Phase 3b 将接 Polygon RPC 做真检测。
+- **Relayer 限流**：所有 `cancel` / `place_order` 经过一个 25/min 的
+  `TokenBucket` (`relayer_req_per_min` 可调)，避免瞬时撤重挂打爆配额。
+- **Retry + CB**：Trading 方法复用 D-036 的 CLOB retry profile（10 次 ×
+  0.3→30s）并走共享 `PMClient` 的断路器。
+- **Risk guard** (`src/pmbot/trading/risk_guard.py`)：
+  - `check_budget`：per-market cap + 总 cash-reserve 上限
+  - `check_daily_drawdown`：读 `risk_state` 表
+  - `check_circuit_open`：honor CB 状态
+  - `on_fill`：单市场亏损比 > `risk.single_stuck_loss_ratio` 则
+    `HaltLevel.PAUSE_NEW`
+  - `HaltLevel ∈ {OK, PAUSE_NEW, HALT_ALL}`，持久化在新表 `risk_state`
+    （每日一行，migration `a9c5d7e3b011`）。
+- **Fill detection**：`FillsCollector` 轮询 authenticated `/data/orders` +
+  `/data/trades`，对比 `my_orders` 状态变化；paper_mode 下空跑（心跳）
+  不调 API。
+- **Keystore**：`unlock_from_prompt` 用 `getpass.getpass`（只认 stdin）；
+  `lock()` 把 pk 字节清零；新增 `sign_message` / `sign_typed_data` /
+  `private_key_hex` 封装 eth_account。密码绝不进日志/env/file/TG。
+- **CLI 新增**：`pmbot unlock` / `wallet-info` / `test-order [--paper|--live]`
+  / `cancel-all`。
+
+**新事件类型**：`ORDER_FILL`、`PARTIAL_FILL`、`CANCEL_CONFIRMED`、
+`PROXY_WALLET_DETECTED`、`RISK_HALT`、`RISK_RESUMED`、`PAPER_ORDER`。
+
+**测试**：`tests/test_keystore.py`、`tests/test_pm_trading.py`、
+`tests/test_risk_guard.py`、`tests/test_fills_collector.py`、
+`tests/test_cli_unlock_flow.py`、`tests/test_rate_limit.py` —
+131 → 167 tests 全绿。
+
+**Why now**：这是首次接触写操作的 phase。安全默认 + 可重试 + 可审计 + 可
+紧急 kill 是把主控权留在人手里的最小必要条件；策略层接入留 Phase 3b。
+
+---
+
 ## 2026-04-14（Phase 2.7）
 
 ### D-038 σ resilience: cache + local orderbook fallback + CB-aware fetch
