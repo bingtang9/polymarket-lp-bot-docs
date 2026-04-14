@@ -260,6 +260,33 @@
 
 ---
 
+## 2026-04-13（Phase 1.5）
+
+### D-030 Orderbook 存储布局：每 side 一行
+**结论**：Phase 1.5 起 `orderbooks` 表采用**"每市场每周期两行"**布局，通过 `outcome` 列（`'yes'`/`'no'`）区分 YES/NO 两侧；每行还带 `token_id` 便于溯源。
+
+**考虑过的两种方案**：
+1. ❌ 单行双侧（`bids_yes`/`asks_yes`/`bids_no`/`asks_no` + 每侧聚合列各 ×2）
+2. ✅ 每侧一行（`outcome` 列 + 同套聚合列）
+
+**为什么选方案 2**：
+- zone 聚合（`mid_price`、`zone_lower/upper`、`total_lp_capital_in_zone`、`front_/back_depth`）**天然每侧独立**——YES 与 NO 的 mid、reward zone 完全不同（PM 两个 token 独立建仓）
+- 方案 1 会强迫每个聚合列复制为 `_yes` / `_no` 两份，schema 冗长且未来加字段要改两次
+- 方案 2 保持"一个快照 = 一行"语义，Phase 3 回放时每行是完整可读的独立事实
+- 筛选器需要的市场级视图可通过 `(market_id, captured_at)` join 两行即时拼出；`pmbot.db.session.latest_orderbooks_for_market()` 已封装此查询
+- 市场级 `total_LP_capital_in_zone` = yes_row + no_row（每侧各自 zone 内资金相加，无双重计数）
+
+**伴随变更**：
+- 新增列：`outcome`、`token_id`、`mid_price`、`rewards_max_spread`、`tick_size`、`zone_lower`、`zone_upper`、`total_lp_capital_in_zone`、`front_depth_usd`、`back_depth_usd`、`depth_usd_top20`
+- 原 `depth_usd_5` 保留向后兼容
+- 采集层同时抓 YES + NO token 的 top-20 档（从 5 提升），一周期 2×50=100 次 HTTP；并发上限 5→10（实测一轮 ~5s，30s 预算内绰绰有余）
+- 筛选器侧 helper：`latest_orderbook(session, market_id, outcome)`、`latest_orderbooks_for_market(session, market_id)`、`expected_own_ratio_for_market(session, market_id, my_capital_usd)`
+- 迁移 `e811e703a041` 为旧 YES-only 行以 `server_default='yes'` 回填 outcome，upgrade/downgrade 均测通
+
+**Why now**：D-027 定义了 `total_LP_capital_in_zone` 维度，需要 YES + NO 双侧 + zone 内范围筛选；Phase 1 只抓 YES top-5 不够用。D-028 每日筛选节奏要求数据层预先算好这些标量以避免把聚合带进 hot path。
+
+---
+
 ## Phase 0 延续的待定项（Phase 1/2 验证）
 
 | 编号 | 问题 | 状态 |
