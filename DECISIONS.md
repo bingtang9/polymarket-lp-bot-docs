@@ -697,3 +697,27 @@ r_daily = reward_daily / (my_capital + zone_cap_in_zone)
 
 **Why**：$100 cap × 千三 = zone 必须 ≤ $2.66k，但新闻标的 zone 普遍 $5k-$50k，必然被卡；放松后 $100 能真正选出短期新闻标
 **实测**：5669 评估 → 29 通过 → **18 入池**（全为 news_event 类别，涵盖政治/科技/经济/地缘/流行文化）
+
+### D-046 Tier C 单边 LP + 真实 affordability（用户决策 2026-04-14）
+**结论**：
+1. Tier C 挂单改**单边** LP（`news_allow_one_sided=true`）——Tier A/B 仍双向
+2. Affordability 公式修正：双向真实成本 = `qty × $1`（不是 `qty × min(yes,no)`）；单边成本 = `qty × cheap_side_price`
+3. 单边 LP 选**便宜一侧的 token**（mid 较低那边）挂 bid
+
+**Why**：
+- $100 cap 下双向真实成本（铸造 yes 库存）超过 cap 一大截
+- 用户明确"金额还是100"，必须在 $100 里跑
+- 单边 LP = 只挂便宜侧 token 的 bid，风险只是无法同时赚两侧 reward（PM 双向 reward 机制下），但不是方向性下注
+
+**实测**（paper mode 模拟 18 个候选，cheap-side 单边 LP）：
+- **7 个能真实挂上**（cost $4.80-$5.00 各/cap $5）：jason-perry / sheila / anthropic / bw-industrial / gpt-5.5×2 / bryan-johnson
+- 10 个 SKIP（min_size × cheap_price > $5）
+- 1 个 FAIL（tick 对齐问题，需要 mid 小数精度处理）
+- 实际部署资金 ~$35/$100，剩 $65 闲置
+
+**后续**（Phase 3b 要做）：
+- Trader 层实现 cheap-side 选择逻辑
+- tick 对齐边缘情况（`price 0.016 not aligned to tick_size 0.01`）——round 到 tick
+- Affordability 门槛增加"能否挂到 min_size"硬检查（替代当前 single-side 估算）
+
+**测试**：167/167 通过（fixture `my_capital_usd` 15→25 适配新公式）
