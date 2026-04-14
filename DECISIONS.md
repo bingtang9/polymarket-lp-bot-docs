@@ -5,6 +5,63 @@
 
 ---
 
+## 2026-04-14（Phase 2.5）
+
+### D-035 Two-stage orderbook architecture
+**结论**：`orderbook_collector` 拆分为三种 `scope`：
+
+| scope | 触发 | 抓取范围 | 预算 |
+|---|---|---|---|
+| `universe` | 每日 `screener.daily_run_utc`（默认 UTC 00:00 = UTC+8 08:00）+ 启动时 catch-up | 全部 rewards-enabled active market，双向 top-20 档 | ~60s（直连）/ 实测 3–6min（经代理） |
+| `pool` | 常驻每 `pool_interval_sec`=30s | 仅当日 `candidate_pool` 中 NEW/RETAINED | ~数秒/cycle |
+| `legacy` | 可选启用 | Phase 1 行为：top-N by `reward_daily_usd` | 兼容回退 |
+
+Runner 并行独立任务：`_universe_scanner_loop`（daily + startup catch-up + 调用 screener）+ pool collector + `_screener_loop`（兜底，若 universe scan 已跑则跳过）+ `_monitor_loop`。
+
+**新 CLI**：`pmbot universe-scan [--with-screen]` — 手动触发一次性扫描，生产零停机试跑。
+
+**配置新增**（`collectors.orderbook`）：`scope`、`pool_interval_sec`、`universe_scan_at_startup`、`universe_max_markets`（0=无上限）、`universe_max_concurrent_requests`（默认 15）、`progress_every`（默认 1000，日志节流）、`legacy_enabled`、`legacy_max_markets`。`screener.trigger_after_universe_scan`（默认 true）。`max_markets` 保留给 legacy scope（Phase 1 兼容）。
+
+**为什么现在做**：全 universe ~5600 个标的一个 30s cycle 拉不完（2×5600=11200 fetches，直连 15 并发 ~60s，接近预算但实测经代理达 ~6min），日常只需对"候选池内"的标的做秒级跟踪。两阶段把"广度"（daily scan for screener）和"频度"（pool tracking for monitor）解耦，API 预算和实时性两全。
+
+**Dress rehearsal**（2026-04-14，`docs/dress_rehearsal_2026-04-14.md`）：universe 扫描 5651 标的 ~11300 fetches 跑完、立即触发筛选、pool 采集器 30 分钟常驻循环验证无异常。
+
+**测试新增**：
+- `tests/test_orderbook_scope.py` — 三种 scope 选取目标的 DB 查询正确性
+- `tests/test_runner_universe_scheduling.py` — `_parse_daily_run_utc` / `_seconds_until_next`
+- `tests/test_universe_scan_cli.py` — `run_universe_scan_once` 写入 DB 的端到端
+
+---
+
+## 2026-04-13（首轮筛选 0 命中后 consolidated update）
+
+### D-034 筛选 + 执行 consolidated update（基于首轮筛选 0 选取的复盘）
+**结论**（12 项一次性合并）：
+
+1. **R 门槛改日收益率**：`R_est_daily ≥ 0.3%`（≈ 109% APR）取代 `R_APR ≥ 5%`。评分分档（日）：≥0.5% = 10 / 0.4–0.5% = 8 / 0.3–0.4% = 6 / 0.2–0.3% = 4 / <0.2% = 0。公式：`R_daily = reward_fund_daily × expected_own_ratio / my_capital`（不再 /365）。
+2. **`capital.max_markets` 8 → 20**（`screener.max_selected` 同步）。
+3. **新增 `capital.per_market_min_usd = $5`**：分配 < $5 的标的直接 skip（不凑数；槽位空着让给下一个高分）。
+4. **σ 加权单标上限**：`sigma_capital_multipliers` 三档（σ≤0.5% ×1.6、σ≤1.0% ×1.2、σ≤2.0% ×1.0）。实现：`pmbot.config.CapitalConfig.sigma_multiplier()` + `screener._allocate_capital()`。
+5. **σ 评分权重 0.20 → 0.30**；T、D 权重 0.20 → 0.15。新 Score = 0.15·T + 0.15·D + 0.30·σ + 0.20·R + 0.10·价格 + 0.10·点差。
+6. **σ 硬门槛保持 ≤ 2%**（长期类）；体育类 ≤ 5%。
+7. **`per_market_max_ratio` 5% → 8%**（$500 × 8% = $40 基础上限）。
+8. **`capital.total_usd` $300 → $500**。
+9. **Bug fix — 双向挂单份数公式**：旧 `capital / 2 / price` 错误；新 `capital / $1`（双向）或 `capital / price`（单向）。PM 机制：pre-mint USDC→yes+no 或 yes-bid+no-bid 成对挂单，两种方式下每对 share 总成本均 ≈ $1。见 `src/pmbot/screening/sizing.py` 与 `tests/test_sizing.py`。
+10. **Tier B sports 门槛单独一套**（`SPORTS_GATES`）：`hours_to_kickoff ≥ 5h`、`σ ≤ 5%`、`p ∈ [5, 95]`、`reward_spread ≥ ±2`，其它门槛同长期。类别识别用 `market.tags`，匹配 `sport/nfl/nba/mlb/nhl/epl/...` 前缀。统一候选池（D-032），不分 Tier 配额。体育 MVP 仍走双向默认。
+11. **删除 `reward_fund_daily ≥ 5` 门槛**：被日 R 门槛覆盖，冗余。
+12. **`collectors.orderbook.max_markets` 50 → 200**：首轮筛选 evaluated 50 个全部 fail，瓶颈是宇宙太窄；扩到 200 增加 zone 聚合样本。
+
+**Why now**：用户首次跑 `pmbot screen` 返回 0 选取；Score 权重偏轻 σ，R 阈值按年率定反而过松/过紧并存，且 max_markets 50 卡死命中面。12 项合并一次性收敛以避免多次小迭代。
+
+**附：sports 类别的 `tags` 字段**：当前 `MarketsCollector` 使用 `get_sampling_markets` 不含 tags；Phase 3 需增补 Gamma API 查询或别的 tag 来源。在 tag 未填充前，sports 标的会 fallback 到 LONG_DATED_GATES（T≥90d 会把大多数体育过滤），这是已知短板，记录在这里等后续迭代。Market 模型已新增 `tags`（JSON）与 `game_start_time`（DateTime）两列，迁移 `d0a42c034001`。
+
+**测试新增**：
+- `tests/test_allocation.py`：σ-multiplier 分配、per_market_min skip、max_markets cap
+- `tests/test_sizing.py`：双向/单向 qty 公式、回归旧公式
+- `tests/test_gates.py`：sports 类别、`gate_hours_to_kickoff`、`gate_sigma_sports`、`gate_price_sports`、`gate_reward_spread_sports`、`gate_r_daily`、删除 `reward_fund` 校验
+
+---
+
 ## 2026-04-14
 
 ### D-001 AI 开发工具
