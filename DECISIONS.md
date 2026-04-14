@@ -607,3 +607,13 @@ r_daily = reward_daily / (my_capital + zone_cap_in_zone)
 （即 `reward × own_ratio / my_capital`，等价）
 
 **Tests**：131/131 通过，新增 depth 无上限/total_lp 1M/own_ratio 千三 三个测试用例
+
+### D-042 起始资金降至 $100（用户决策 2026-04-14）
+**结论**：`capital.total_usd` 500 → **100**
+**Why**：用户原话"前期计划金额100u"——更保守的小额验证起步
+**数学影响**：
+- 单标基础上限 = 100 × 8% = $8（之前 $40）
+- 平均分配 = 100 × 90% / 20 = $4.5（< per_market_min_usd=$5 → 触发跳过）
+- own_ratio ≥ 0.3% (千三) 隐含 zone_cap ≤ $8 / 0.003 - $8 ≈ **$2.66k**
+- 实际入池数严重受限（只有 zone ≤ $2.6k 的小盘标能过 own_ratio）
+**实测**：3 个 LoL 电竞总场数标入池（zone $2.2k-2.3k），各 $6 cap
