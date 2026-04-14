@@ -519,22 +519,30 @@ Runner 层由 `_universe_scanner_loop`（含 startup catch-up + 每日调度）+
 - **绝不**通过任何通讯通道（Telegram / 邮件 / SSH）传输密码
 - 日志过滤私钥、密码、keystore 内容
 
-### 7.2 启动流程（半自动）
+### 7.2 启动流程（Phase 3c, D-049 三层 live opt-in）
 ```
-Mac 开机
-  ↓
-launchd 自动拉起 bot 进程
-  ↓
-bot 启动 → 状态：等待解锁 → 不交易，只做只读监控
-  ↓
-用户登录 Mac mini → 打开终端 → 运行 pmbot unlock
-  ↓
-终端提示输入密码 → 密码进入 bot 内存
-  ↓
-bot 解锁钱包 → 开始交易
+# 默认安全模式：paper mode，无密码
+pmbot run --paper
+
+# 实盘启动：三层授权缺一不可
+# 1. CLI flag       --live
+# 2. 终端解锁        getpass 提示输入 keystore 密码
+# 3. 首单确认        --confirm-real-trade （进程生命周期首单必须带）
+pmbot preflight              # 12 项绿/红 checklist，全绿才继续
+pmbot run --live --confirm-real-trade
+# → 提示密码 → unlock → proxy detect → L2 API creds → balance 检查 → daemon 起
 ```
 
-**如果 Mac 意外重启**：bot 自动起但不交易（等解锁），状态正常可见；用户物理到场或 VNC 远程登录输密码即可。
+**安全不变量**：
+- `paper_mode=true` 是所有代码路径默认
+- Paper 模式永不 touch 私钥 / web3 / CLOB
+- SIGINT/SIGTERM 时调 `keystore.lock()`，私钥 bytearray 置 0
+- 进程重启后首单 gate 重新上锁（`_live_confirmed` 仅 in-memory）
+- 密码只走 `getpass`，绝不接受 env / file / TG / log
+
+**如果 Mac 意外重启**：bot 自动起，但除非你用 `--live` 否则不下真单；`--live` 需人工输密码。
+
+详细步骤见 `docs/going_live_checklist.md`。
 
 ### 7.3 日志
 - 路径：`./logs/pmbot.YYYY-MM-DD.log`，按天切割

@@ -759,3 +759,40 @@ r_daily = reward_daily / (my_capital + zone_cap_in_zone)
 - 首单 `--confirm-real-trade` flow
 - `get_position / get_balance_usdc` 用 web3 读 ERC-1155 / ERC-20
 - Monitor → trader 的 reprice/cancel 触发（不仅仅是 pool REMOVED）
+
+### D-049 Phase 3c: 实盘（真钱）交易 opt-in 流（2026-04-13）
+**结论**：从 paper-only 进入「可下真单」状态，但默认仍然 paper；live 只能通过三层明确授权开启。
+
+**三层授权**（缺一不可）：
+1. CLI flag `--live`（默认 `--paper`）
+2. 启动时交互式输入 keystore 密码（`getpass`，只走终端）
+3. 首单 `--confirm-real-trade`（进程生命周期内首单必须带；其后同进程内单无需重复）
+
+**主要改动**：
+1. `pmbot run [--paper|--live] [--confirm-real-trade]`：统一守护入口；live 走 `security/unlock.py::unlock_for_live`（加载 → 解密 → detect_proxy_wallet → L2 API creds 推导 → USDC/MATIC 余额 sanity）
+2. `pmbot preflight`：12 项绿/红 checklist（keystore / chmod / Polygon RPC / USDC≥5 / MATIC≥0.1 / proxy / CLOB / gamma / L2 creds / DB schema / risk_state），第一项红就退出
+3. `PMTrader.get_balance_usdc / get_balance_matic / get_position`：真 web3 读 USDC.e（ERC-20）+ MATIC（native）+ CTF（ERC-1155 balanceOf）；10s 缓存；RPC fail → 回退 last-seen
+4. `_intraday_canceller_loop`：monitor 每轮 tick 后把 evicted market_ids 塞进 `intraday_eviction_queue`，trader 消费并对每个 market `cancel_all_for_market`
+5. `_place_live`：失败路径写 `LIVE_ORDER_FAILURE` 事件（含完整错误上下文），不重试同 `client_order_id`
+6. `config.py`：`trading.ctf_address / balance_cache_ttl_s / min_usdc_balance / min_matic_balance`
+7. Runner 在 SIGINT/SIGTERM 时调 `keystore.lock()`，私钥置零
+
+**安全不变量**：
+- `paper_mode=True` 仍是所有路径的默认
+- Paper 模式代码永远不 touch 私钥、永不调 web3 / CLOB
+- Live 模式下 notional > per_market_cap × 1.5 拒单（已存在）+ 余额 < 门槛 warn（新增）
+- keystore 始终只 in-memory bytearray，`lock()` / 进程退出时置 0
+
+**测试**：203 → **218/218**（+15：unlock 3 / balance 4 / canceller 2 / preflight 3 / first-confirm 3）
+
+**Not in scope**（留给 3d）：
+- Daily relayer budget tracking（目前仅 per-minute token bucket）
+- TG 首单确认 prompt（spec 列出但实际风险已由 `--confirm-real-trade` 覆盖，TG 单向通知够用）
+- Reprice loop（monitor 当前只 cancel，不改价）
+
+### D-048 Trader 用 market.tick_size 验价，不用全局默认
+**Bug**：Phase 3b 集成跑后 3 个 gpt/italy 标（tick_size=0.001）验价失败
+- PMTrader._validate 调用时 tick_size=cfg.min_tick_size (0.01)
+- 但 market.tick_size = 0.001 → 价 0.073 被拒（0.073/0.01=7.3 小数）
+**Fix**：trader.place_order 把 market row lookup 提前，用 `row.tick_size` 替换 cfg 默认
+**实测**：14/18 挂上（+3 原来失败的；4 SKIP 正常 qty<min_size）
