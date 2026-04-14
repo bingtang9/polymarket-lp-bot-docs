@@ -579,3 +579,31 @@ Phase 3（真实下单）做取舍时有据可依。
 
 每次有新决策（无论是 Telegram 上还是线下讨论）→ 追加到这个文件顶部（按日期倒序）。
 待定项决定后移到主列表并标日期。
+
+---
+
+### D-041 重定位"中流动性主流"（用户决策 2026-04-14）
+**结论**：放宽多个上限 + 收紧 own_ratio 到千三
+
+| 项 | 旧 | 新 |
+|---|---|---|
+| `MAX_DEPTH_USD` | 100,000 | **None**（删除上限，深度高=反塞单好事） |
+| `MAX_TOTAL_LP_IN_ZONE` | 50,000 | 1,000,000（升级为 sanity cap） |
+| `MIN_OWN_RATIO` | 0.02 (2%) | **0.003 (千三)** ← 用户原话 |
+| `MAX_SIGMA_LONG` | 0.02 (2%) | 0.05 (5%) |
+| σ 资金乘数表 | 3 档 (≤0.5/1.0/2.0%) | 5 档（新增 ≤3.5%×0.7 / ≤5.0%×0.5） |
+
+**Why**：
+- 用户质疑 100k depth 上限：高深度=好事（反塞单）；"市场拥挤度"应该用 own_ratio 单独管，不该用 depth
+- 用户指定目标 own_share = 千三：意味着我们接受在大市场里做小份额 LP
+- 数学：own_ratio≥0.3% 隐含 zone_cap ≤ my_cap × 332；$40 my_cap → zone_cap ≤ $13k
+- σ 真实数据出来后，政治长期标普遍 5-50% 波动，原 2% 完全选不出
+- D-040 标签修复后，sports 类 NHL/MLB 真识别，但 depth 100k 上限把 $400k+ 的主流游戏全部挡掉
+
+**R 公式**：自然包含 own_ratio
+```
+r_daily = reward_daily / (my_capital + zone_cap_in_zone)
+```
+（即 `reward × own_ratio / my_capital`，等价）
+
+**Tests**：131/131 通过，新增 depth 无上限/total_lp 1M/own_ratio 千三 三个测试用例
