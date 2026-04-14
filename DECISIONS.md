@@ -5,7 +5,75 @@
 
 ---
 
+## 2026-04-14（Phase 2.7）
+
+### D-038 σ resilience: cache + local orderbook fallback + CB-aware fetch
+**背景**：Phase 2.6 拿到了 sports tags，但 `pmbot universe-scan --with-screen`
+仍然 selected=0。根因是筛选期 σ 单点依赖 `/prices-history`：CLOB 在代理抖动
+时 circuit breaker 会 OPEN，于是每个市场都被 `insufficient_history` 拒绝。
+
+**结论**：σ 计算从单源改为 4-源 pipeline（`pmbot/screening/sigma_cache.py`）：
+
+- **A. cache**：`prices_history_snapshots` 行新鲜度 ≤ TTL（默认 12h）
+- **B. orderbook_local**：`orderbooks.mid` 近 7 天 ≥ 24 个样本时，σ=stdev/mean
+- **C. fresh_fetch**：调 `/prices-history`；CB OPEN 时直接跳过
+- **D. default_fallback**：常量 0.025（默认），可 null 关闭
+
+新表 `prices_history_snapshots`（迁移 `f3d8a1c2e701`）存 `(market_id, token_id, fetched_at, history_json, sigma_7d, max_jump_24h, source)`；索引 `(market_id, fetched_at DESC)` 支持按最新取。
+
+**预热**：universe scan 收尾时 `_prewarm_targets` 挑出 long-dated 或 sports 的市场，`prewarm_sigma_cache` 顺序拉 `/prices-history`（并发=1）写入缓存；5 min 硬超时、CB OPEN 时 sleep 2s 且不算一次尝试。
+
+**可见降级**：0.025 > 2% 长期 σ 门槛 → 市场仍然被拒，但拒绝原因从 `insufficient_history`（不可见）变成 `σ=0.025>0.02`（可见）；`screener_runs.extra.sigma_source_counts` 给出每次运行的源分布。
+
+**配置**（`screener.*`）：`sigma_cache_ttl_hours=12.0`、`sigma_default_fallback=0.025`、`sigma_prewarm_enabled=true`、`sigma_prewarm_time_limit_s=300`。
+
+**测试新增**：`tests/test_sigma_cache.py`（cache TTL、A/C/D 源穿透、写缓存副作用）、`tests/test_sigma_orderbook_local.py`（合成 orderbook 行 → σ 数学）、`tests/test_sigma_circuit_breaker.py`（CB OPEN → Source C 短路 → D）。
+
+**Why now**：Phase 2.6 把数据层修通了，但筛选流水线还是 0 命中。本次不改门槛、不改 sports 语义，只把 σ 的可用性从「靠一次网络请求」提升到「缓存+本地+网络+降级」四保险。
+
+---
+
 ## 2026-04-14（Phase 2.6）
+
+### D-037 Gamma tag enrichment collector (unblocks Tier B sports gates)
+**背景**：D-034 搭好了 `SPORTS_GATES`，但 CLOB `get_sampling_markets`（喂
+`MarketsCollector`）不返回 tags 与 `gameStartTime` — 所有标的
+`market.tags IS NULL` → `is_sports_market()` 永远 False → Tier B 路径从未
+被触发 → 295/301 evaluated fail 于 `T<90d`。
+
+**结论**：新增 `TagsCollector`（`src/pmbot/collectors/tags_collector.py`）
+用 Gamma REST 回填 `markets.tags` 和 `markets.game_start_time`。
+
+- **Gamma schema 验证**：`/markets?condition_ids=X` 返回的市场对象中
+  `tags` 与 `events[0].tags` 均为 null；tags 实际挂在 event 上。
+  →  两步解析：bulk fetch markets → 对每个 `events[0].slug` 调用
+  `/events/slug/{slug}` 取 tags（逐 slug 周期内缓存）。
+- **标签规范化**：存库前把 `[{"slug":"sports","label":"Sports"},...]`
+  扁平成 slug 字符串列表 `["sports","nba"]`，与 `is_sports_market()`
+  消费形式一致；也容忍 dict / str / None / 畸形条目。
+- **节奏**：hourly（`collectors.tags.interval_sec=3600`）— 标签几乎不变，
+  polling 慢即可；每周期上限 `max_markets_per_cycle=500`（让全宇宙
+  5669 markets 在约 10–12 个 cycle 后完全覆盖），batch=50 per HTTP call。
+- **优先级**：只挑 `tags IS NULL OR tags=[]` 的行；Gamma 返回为空的
+  cid 落盘成 `tags=[]`，避免下个 cycle 重拉。
+- **one-shot 回填**：新增 `pmbot tags-backfill [--limit N]` CLI，
+  同一 collector 循环跑到 targets 为空为止。
+
+**Live backfill**（2026-04-14，5669 markets，full universe）：
+- 单 cycle 50 markets ≈ 10.9s → 有效吞吐 ≈ 4.6 markets/s。
+- 全量预计 ~20 min；实际运行见 `/tmp/backfill2.log`。
+- Schema quirk：少数 cid Gamma 不返回行，落 `tags=[]` 已处理。
+
+**事件新增**：`TAGS_FETCHED`（每 cycle 一条，payload=`{updated, failed}`）。
+
+**测试新增**：`tests/test_tags_collector.py`（9 用例）覆盖：
+扁平化各种 tag shape、缺失 Gamma 行、batch 失败、无 target 跳过、
+已标记的不重复拉、backfill 循环到空、CLI dispatch。
+
+**Why now**：D-034 体育门槛落地但数据不通，Tier B 实际仍是死路；
+先把数据层修好再看 screener 效果。
+
+---
 
 ### D-036 Network resilience for shared-proxy Cloudflare throttling
 **结论**：环境适配（而非改代理）。主要变更：
@@ -77,6 +145,27 @@ Runner 并行独立任务：`_universe_scanner_loop`（daily + startup catch-up 
 - `tests/test_orderbook_scope.py` — 三种 scope 选取目标的 DB 查询正确性
 - `tests/test_runner_universe_scheduling.py` — `_parse_daily_run_utc` / `_seconds_until_next`
 - `tests/test_universe_scan_cli.py` — `run_universe_scan_once` 写入 DB 的端到端
+
+---
+
+## 2026-04-14（继续）
+
+### D-039 universe scan 限定 top-500 by reward
+**结论**：`collectors.orderbook.universe_max_markets` 从 `0`(不限) 改为 `500`
+
+**Why**：
+- 用户提议（2026-04-14）："标的太多了，可以改成按奖池金额排序，只看前 500 个"
+- 当前 5668 个 reward 标里，第 500 名 daily reward 阈值 ≈ $60/天
+- 阈值之下的标长尾低价值，自身 share 拿到也只赚几毛/天，不值得占网络/算力配额
+- 全量扫描受代理限制约 ~16 min；扫 500 个预计 ~2 min，screener 反应更快
+- 排序逻辑 `reward_daily_usd DESC NULLS LAST` 在 collector 已实现，仅改配置即可生效
+
+**实施**：单行配置改 `universe_max_markets: 500`，无需新代码、无需 schema 变更。
+
+**影响**：
+- universe 扫描覆盖从 5668 → 500（top-9%）
+- 5168 个长尾标的不再被采集 orderbook，但元数据/tags/rewards 仍正常入库（其它 collector 不变）
+- 体育标 NHL/NBA 当日比赛奖池都 ≥$1000/day，全部包含在 top-500 内
 
 ---
 

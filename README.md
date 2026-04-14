@@ -488,6 +488,22 @@ Runner 层由 `_universe_scanner_loop`（含 startup catch-up + 每日调度）+
 `_screener_loop`（兜底，若 universe scan 已触发筛选则跳过）+ pool collector +
 `_monitor_loop` 并行独立运行。
 
+### 6.3.2 Gamma tag 富化采集（Phase 2.6, D-037）
+
+`tags_collector`（`src/pmbot/collectors/tags_collector.py`）独立 asyncio
+任务，每 `collectors.tags.interval_sec`（默认 1 小时）跑一次。流程：
+1. 选取 `markets.tags IS NULL OR tags=[]` 的行（每周期上限 500）
+2. 调用 Gamma `/markets?condition_ids=...`（batch=50）拿到市场行 + 嵌套
+   `events[0].slug`
+3. 逐 slug 调用 `/events/slug/{slug}` 取 tag 列表（cycle 内缓存）
+4. 扁平化成 slug 字符串列表回写 `markets.tags`；如市场行自带
+   `gameStartTime` 一并写 `markets.game_start_time`
+5. emit `TAGS_FETCHED` 事件
+
+一次性全量回填：`pmbot tags-backfill` CLI 走同一循环直到 target 为空。
+筛选器的 `is_sports_market(tags)`（`pmbot.screening.gates`）在 tag
+富化后才能生效 → D-034 的 `SPORTS_GATES` 终于不再永远走不到。
+
 ### 6.4 数据完整性
 - WAL 模式 + `synchronous=NORMAL`：崩溃不丢已提交数据
 - 每小时自动备份 DB 文件到独立目录
