@@ -5,6 +5,53 @@
 
 ---
 
+## 2026-04-14（Phase 2.6）
+
+### D-036 Network resilience for shared-proxy Cloudflare throttling
+**结论**：环境适配（而非改代理）。主要变更：
+
+1. **Per-endpoint 重试**（`pmbot.pm.retry`）：CLOB 10 次 × 指数退避 0.3→30s；
+   Gamma 3 次 × 0.5→5s。仅重试 transient 网络错误
+   （`ConnectionResetError`、`httpx.ConnectError/ReadTimeout/RemoteProtocolError`、
+   `PolyApiException(status_code=None)`）；`4xx` 永不重试。
+2. **并发降低**：`orderbook.max_concurrent_requests` 10 → 3（pool）；
+   `universe_max_concurrent_requests` 15 → 5。测得共享代理 IP 下，
+   更高并发只会触发更多 Cloudflare RST。
+3. **部分容忍的 universe 扫描**：15 分钟硬超时，100 个 fetch 一批
+   commit，允许超时后保留已写入数据。完成率 < 70% 时 emit
+   `UNIVERSE_SCAN_PARTIAL` 事件但继续 hand-off 给 screener。
+4. **自适应并发**（universe scope）：每 100 fetch 为一个 batch，
+   fail_ratio > 50% 则折半并发、< 10% 连续 2 batch 则翻倍（顶格到 config max）。
+5. **断路器**（`pmbot.pm.circuit_breaker`）：60s 滚动窗口，≥20 样本且
+   fail_ratio > 80% → open 30s；冷却后半开，单次探测成功则关闭。
+6. **Pool mode 降级**：cycle 内不额外重试；同一 market 连续失败 5
+   个 cycle 发 `MARKET_FETCH_STALLED` 事件 + TG 告警。screener/monitor
+   使用最近一次成功快照（带 `captured_at`），不要求实时。
+
+**实测**（2026-04-14）：在 5668 个标的的 universe 扫描中，在代理
+轻载条件下稳定 11 req/s、约 16 分钟写入 ~5023 个 market 的 orderbook
+数据；最后 ~2000 fetch 触碰 15 分钟墙钟硬截止，断路器在 81%
+fail_ratio（191 样本）时正确 open 30s，降级路径完整生效。
+
+**新事件类型**：`UNIVERSE_SCAN_PARTIAL`、`MARKET_FETCH_STALLED`、
+`CIRCUIT_BREAKER_OPEN`、`CIRCUIT_BREAKER_CLOSE`。
+
+**配置新增**：
+- `pm_api.retry.*`（6 knob）
+- `pm_api.circuit_breaker.*`（5 knob）
+- `collectors.orderbook.partial_complete_ratio`、`universe_timeout_s`、
+  `adaptive_batch_size`、`adaptive_halve_threshold`、
+  `adaptive_double_threshold`、`pool_stall_cycles`
+
+**测试新增**：`tests/test_retry_config.py`、`tests/test_circuit_breaker.py`、
+`tests/test_adaptive_concurrency.py`。
+
+**诊断记录**：Clash 出口 IP `103.175.98.14` 与其它 Polymarket 用户共享，
+Cloudflare 对该 IP 做 40–60% 丢包式 throttle。用户明确不更换代理，
+故采取环境适配策略。完整背景见 `docs/network_resilience.md`。
+
+---
+
 ## 2026-04-14（Phase 2.5）
 
 ### D-035 Two-stage orderbook architecture
