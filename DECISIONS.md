@@ -721,3 +721,41 @@ r_daily = reward_daily / (my_capital + zone_cap_in_zone)
 - Affordability 门槛增加"能否挂到 min_size"硬检查（替代当前 single-side 估算）
 
 **测试**：167/167 通过（fixture `my_capital_usd` 15→25 适配新公式）
+
+### D-047 Phase 3b: trader wired into runner + fixes (2026-04-13)
+**结论**：strategy loop 消费 candidate_pool，dispatch place/cancel；修复 tick、proxy、auth、affordability 四处。
+
+**新增/改动**：
+1. **`trading/planner.py`**（新）— pure builder：`(Market + orderbook + cfg) → list[OrderPlan]`
+   - Tier A/B 双边 yes BUY+SELL（成本 qty×$1）
+   - Tier C news 单边 cheap-side BID（成本 qty×cheap_price；`mid(yes,no)` 取小者）
+   - qty = floor(alloc / cost_per_share), 下限 rewards_min_size，整数股
+2. **`trading/ticks.py`**（新）— `round_to_tick / validate_price`，修复 `0.016 → 0.02` bug；planner 每次 emit 前 snap，trader `_validate` 用同一校验
+3. **`trading/proxy_wallet.py`**（新）— 真实 Polygon RPC 检测：
+   - CREATE2 推导 Safe 1.3.0 proxy 地址（优先用 `py_clob_client.utilities`，fallback 本地 keccak）
+   - `eth_getCode` → 有代码 signature_type=2 funder=proxy；无代码 type=0 funder=eoa
+   - graceful degradation：web3 缺失/RPC 报错 → 默认 EOA + warn
+4. **`trader.py`** 改动：
+   - `_probe_proxy` 调用 proxy_wallet，并将结果回写 `cfg.trading.{signature_type,funder}`（内存）
+   - `_validate` 复用 `validate_price`
+   - 新增 `ensure_clob_auth()`：实例化 ClobClient（`host+private_key_hex+chain_id+signature_type+funder`）+ `set_api_creds(create_or_derive_api_creds())`；paper 模式 no-op
+5. **`runner.py`** 改动：
+   - 新增 `_strategy_loop` + `_dispatch_trading`：从 `asyncio.Queue[ScreenerResult]` 消费，逐 market 调 planner→trader.place_order；removed_from_yesterday→trader.cancel_all_for_market
+   - `_universe_scanner_loop / _screener_loop` 完成一次 screener 后 put 到 queue
+   - `_main` 构造 PMTrader（keystore=None，纯 paper）+ 启动 strategy task
+6. **`gates.py` affordability 增强**：原来只查 `min_size × price ≤ cap`；现增 `max_qty (= cap/cost_per_share) ≥ min_size` 硬检查，防止"进池但挂不上"（paper 模拟显示的 10 skip）
+7. **`pyproject.toml`**：新增 `web3>=6.0`
+8. **`config.py`**：`PMApiConfig.polygon_rpc_url = "https://polygon-rpc.com"`
+
+**Why 分 Queue 解耦 screener↔trader**：trader 批量 place/cancel 可能 10 秒级（relayer 25 req/min），不阻塞 universe scanner 下一轮 cadence。queue maxsize=8 防止雪崩。
+
+**Why 单边 cheap-side**：D-046 明确 $100 资金下双向铸造成本超 cap；单边 bid 只付 qty×cheap_price，小额可行。
+
+**测试**：167 → **203/203**（+36：ticks/planner/proxy_wallet/strategy_loop）
+**Paper 验证**：strategy_loop + _dispatch_trading 在 `test_strategy_loop.py` 三个 case 下真实写入 my_orders（paper），NEW 双边 2 单、news 单边 1 单、REMOVED cancel 全部改 status=CANCELED。
+
+**下一步（Phase 3c）**：
+- 真实 keystore 解锁 CLI 命令
+- 首单 `--confirm-real-trade` flow
+- `get_position / get_balance_usdc` 用 web3 读 ERC-1155 / ERC-20
+- Monitor → trader 的 reprice/cancel 触发（不仅仅是 pool REMOVED）
